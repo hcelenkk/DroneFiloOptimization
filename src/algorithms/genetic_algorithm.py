@@ -1,153 +1,279 @@
+from typing import List, Tuple
 import random
-from typing import List, Tuple, Dict
+from src.utils.graph import Graph
 from src.models.drone import Drone
 from src.models.delivery_point import DeliveryPoint
-from src.utils.graph import Graph
 
 class GeneticAlgorithm:
-    def __init__(self, drones: List[Drone], delivery_points: List[DeliveryPoint], graph: Graph,
-                 population_size: int = 100, generations: int = 100, mutation_rate: float = 0.1):
+    def __init__(self, drones: List[Drone], delivery_points: List[DeliveryPoint], graph: Graph):
         self.drones = drones
         self.delivery_points = delivery_points
         self.graph = graph
-        self.population_size = population_size
-        self.generations = generations
-        self.mutation_rate = mutation_rate
-        self.population = self._initialize_population()
+        self.population_size = 200
+        self.generations = 100
+        self.valid_dp_ids = [dp.id for dp in self.delivery_points]
 
-    def _initialize_population(self) -> List[List[List[int]]]:
-        """Rastgele popülasyon oluşturur: her birey, drone'lara atanmış teslimat sıralarını içerir."""
+    def validate_chromosome(self, chromosome: List[List[int]]) -> Tuple[bool, str]:
+        """Chromosome'da duplicate teslimat ve tek paket kısıtını kontrol et"""
+        all_deliveries = []
+        
+        # Her drone'un rotasını kontrol et
+        for i, drone_route in enumerate(chromosome):
+            # TEK PAKET KISITI: Her drone maksimum 1 teslimat yapabilir
+            if len(drone_route) > 1:
+                return False, f"Drone {i} has {len(drone_route)} deliveries, but can only carry 1 package"
+            
+            all_deliveries.extend(drone_route)
+        
+        # Duplicate kontrol
+        unique_deliveries = set(all_deliveries)
+        if len(all_deliveries) != len(unique_deliveries):
+            duplicates = [x for x in all_deliveries if all_deliveries.count(x) > 1]
+            return False, f"Duplicate deliveries found: {set(duplicates)}"
+        
+        # Geçersiz teslimat ID kontrol
+        valid_delivery_ids = set(self.valid_dp_ids)
+        invalid_ids = unique_deliveries - valid_delivery_ids
+        if invalid_ids:
+            return False, f"Invalid delivery IDs: {invalid_ids}"
+            
+        return True, "Valid"
+
+    def repair_chromosome(self, chromosome: List[List[int]]) -> List[List[int]]:
+        """Bozuk chromosome'u onar - tek paket kısıtını uygula"""
+        # Her drone'dan sadece ilk teslimatı al (tek paket kısıtı)
+        repaired_chromosome = []
+        used_deliveries = set()
+        
+        for drone_route in chromosome:
+            if drone_route and drone_route[0] not in used_deliveries:
+                # İlk teslimatı al ve kullanıldı olarak işaretle
+                repaired_chromosome.append([drone_route[0]])
+                used_deliveries.add(drone_route[0])
+            else:
+                # Boş route veya zaten kullanılmış teslimat
+                repaired_chromosome.append([])
+        
+        # Atanmamış teslimatları boş drone'lara dağıt
+        all_delivery_ids = set(self.valid_dp_ids)
+        unassigned = list(all_delivery_ids - used_deliveries)
+        
+        for delivery_id in unassigned:
+            # Boş drone bul
+            empty_drone_idx = None
+            for i, route in enumerate(repaired_chromosome):
+                if not route:  # Boş drone
+                    empty_drone_idx = i
+                    break
+            
+            if empty_drone_idx is not None:
+                # Drone kapasitesini kontrol et
+                delivery = next(dp for dp in self.delivery_points if dp.id == delivery_id)
+                drone = self.drones[empty_drone_idx]
+                
+                if delivery.weight <= drone.max_weight:
+                    repaired_chromosome[empty_drone_idx] = [delivery_id]
+            
+        return repaired_chromosome
+
+    def find_best_drone_for_delivery(self, delivery_id: int, current_chromosome: List[List[int]]) -> int:
+        """Bir teslimat için en uygun BOŞ drone'u bul"""
+        try:
+            delivery = next(dp for dp in self.delivery_points if dp.id == delivery_id)
+        except StopIteration:
+            return None
+        
+        best_drone_idx = None
+        best_score = float('inf')
+        
+        for i, drone in enumerate(self.drones):
+            # Sadece boş drone'ları değerlendir (tek paket kısıtı)
+            if current_chromosome[i]:  # Drone zaten dolu
+                continue
+            
+            # Kapasite kontrolü
+            if delivery.weight > drone.max_weight:
+                continue
+                
+            # Mesafe hesabı
+            distance = ((drone.start_pos[0] - delivery.pos[0])**2 + 
+                       (drone.start_pos[1] - delivery.pos[1])**2)**0.5
+            
+            if distance < best_score:
+                best_score = distance
+                best_drone_idx = i
+                
+        return best_drone_idx
+
+    def _fitness(self, routes: List[List[int]]) -> float:
+        """
+        Fitness fonksiyonu: Tek paket kısıtını da kontrol eder
+        """
+        # Önce validasyon kontrol
+        is_valid, error_msg = self.validate_chromosome(routes)
+        if not is_valid:
+            return float('-inf')
+        
+        total_deliveries = sum(len(route) for route in routes if route)
+        total_energy = 0
+        violations = 0
+        
+        for i, route in enumerate(routes):
+            if not route:
+                continue
+            
+            # Tek paket kısıtı kontrolü (ekstra güvenlik)
+            if len(route) > 1:
+                violations += 10  # Çok ağır penaltı
+                continue
+                
+            current_pos = self.drones[i].start_pos
+            drone = self.drones[i]
+            dp_id = route[0]  # Sadece bir teslimat var
+            
+            try:
+                dp = next(dp for dp in self.delivery_points if dp.id == dp_id)
+                
+                # Mesafe hesaplama
+                distance = ((current_pos[0] - dp.pos[0]) ** 2 + (current_pos[1] - dp.pos[1]) ** 2) ** 0.5
+                
+                # Enerji tüketimi hesaplama
+                energy_consumption = distance * 5 / drone.speed
+                total_energy += energy_consumption
+                
+                # Kapasite ihlali kontrolü
+                if dp.weight > drone.max_weight:
+                    violations += 1
+                
+                # No-fly zone ihlali kontrolü
+                if self.graph.is_in_no_fly_zone(current_pos, dp.pos):
+                    violations += 1
+                
+            except StopIteration:
+                violations += 1
+                continue
+        
+        # Fitness formülü
+        fitness = (total_deliveries * 50) - (total_energy * 0.1) - (violations * 1000)
+        return fitness
+
+    def _crossover(self, parent1: List[int], parent2: List[int]) -> List[int]:
+        """Çaprazlama işlemi - Tek paket için basitleştirildi"""
+        # Tek paket taşıyabildiği için crossover daha basit
+        if not parent1 and not parent2:
+            return []
+        if not parent1:
+            return parent2.copy() if len(parent2) <= 1 else [parent2[0]]
+        if not parent2:
+            return parent1.copy() if len(parent1) <= 1 else [parent1[0]]
+        
+        # Rastgele birini seç (tek paket kısıtı)
+        if random.random() < 0.5:
+            return [parent1[0]] if parent1 else []
+        else:
+            return [parent2[0]] if parent2 else []
+
+    def _mutate(self, route: List[int]) -> List[int]:
+        """Mutasyon işlemi - Tek paket için"""
+        if random.random() < 0.1:  # %10 mutasyon şansı
+            if route:
+                # Mevcut teslimatı rastgele başka bir teslimatla değiştir
+                available_dps = [dp_id for dp_id in self.valid_dp_ids if dp_id != route[0]]
+                if available_dps and random.random() < 0.3:
+                    route[0] = random.choice(available_dps)
+            else:
+                # Boş rotaya rastgele teslimat ekle
+                if random.random() < 0.2:
+                    route.append(random.choice(self.valid_dp_ids))
+        
+        # Tek paket kısıtını zorla
+        if len(route) > 1:
+            route = [route[0]]
+            
+        return route
+
+    def _generate_initial_population(self) -> List[List[List[int]]]:
+        """Başlangıç popülasyonunu üret - Tek paket kısıtı ile"""
         population = []
-        dp_ids = [dp.id for dp in self.delivery_points]
         
         for _ in range(self.population_size):
             individual = []
-            remaining_dps = dp_ids.copy()
-            for _ in self.drones:
-                # Her drone için rastgele bir teslimat sırası
-                if not remaining_dps:
-                    individual.append([])
-                    continue
-                route_length = random.randint(0, len(remaining_dps))
-                route = random.sample(remaining_dps, route_length)
+            used_dps = set()
+            
+            for drone in self.drones:
+                # Her drone için maksimum 1 teslimat
+                available_dps = [dp_id for dp_id in self.valid_dp_ids if dp_id not in used_dps]
+                
+                if available_dps:
+                    # Drone kapasitesine uygun DP'leri filtrele
+                    suitable_dps = []
+                    for dp_id in available_dps:
+                        dp = next(dp for dp in self.delivery_points if dp.id == dp_id)
+                        if dp.weight <= drone.max_weight:
+                            suitable_dps.append(dp_id)
+                    
+                    if suitable_dps and random.random() < 0.7:  # %70 şansla teslimat ata
+                        selected_dp = random.choice(suitable_dps)
+                        route = [selected_dp]
+                        used_dps.add(selected_dp)
+                    else:
+                        route = []
+                else:
+                    route = []
+                    
                 individual.append(route)
-                # Atanan teslimatları kalan listeden çıkar
-                remaining_dps = [dp for dp in remaining_dps if dp not in route]
+            
             population.append(individual)
         
         return population
 
-    def _calculate_fitness(self, individual: List[List[int]], current_time: str) -> float:
-        """Fitness fonksiyonu: teslimat sayısı, enerji tüketimi ve kısıt ihlallerine göre."""
-        total_deliveries = 0
-        total_energy = 0.0
-        constraint_violations = 0
-
-        # Her drone'un rotasını değerlendir
-        for drone_idx, route in enumerate(individual):
-            drone = self.drones[drone_idx]
-            current_weight = 0.0
-            current_pos = drone.start_pos
-            battery_used = 0.0
-
-            for dp_id in route:
-                # Teslimat noktasını bul
-                dp = next((dp for dp in self.delivery_points if dp.id == dp_id), None)
-                if not dp:
-                    constraint_violations += 1
-                    continue
-
-                # Kısıt kontrolleri
-                # 1. Ağırlık
-                if current_weight + dp.weight > drone.max_weight:
-                    constraint_violations += 1
-                    continue
-                
-                # 2. Batarya (mesafe * 10 mAh/metre)
-                distance = ((current_pos[0] - dp.pos[0]) ** 2 + (current_pos[1] - dp.pos[1]) ** 2) ** 0.5
-                battery_consumption = distance * 10
-                if battery_used + battery_consumption > drone.battery:
-                    constraint_violations += 1
-                    continue
-                
-                # 3. Zaman penceresi
-                dp_start, dp_end = dp.time_window
-                if not (dp_start <= current_time <= dp_end):
-                    constraint_violations += 1
-                    continue
-
-                # Geçerli teslimat
-                total_deliveries += 1
-                current_weight += dp.weight
-                battery_used += battery_consumption
-                total_energy += battery_consumption
-                current_pos = dp.pos
-
-        # Fitness: (teslimat sayısı * 50) - (enerji * 0.1) - (ihlaller * 1000)
-        return (total_deliveries * 50) - (total_energy * 0.1) - (constraint_violations * 1000)
-
-    def _tournament_selection(self, population: List[List[List[int]]], tournament_size: int = 5) -> List[List[int]]:
-        """Turnuva seçimi ile bir birey seçer."""
-        tournament = random.sample(population, tournament_size)
-        return max(tournament, key=lambda ind: self._calculate_fitness(ind, "10:00"))
-
-    def _crossover(self, parent1: List[List[int]], parent2: List[List[int]]) -> Tuple[List[List[int]], List[List[int]]]:
-        """Sıralı çaprazlama (ordered crossover) ile iki çocuk üretir."""
-        child1, child2 = [], []
+    def run(self, current_time: str = "00:00") -> Tuple[List[List[int]], float]:
+        """Genetik algoritmayı çalıştırır - Tek paket kısıtı ile"""
+        population = self._generate_initial_population()
         
-        for route1, route2 in zip(parent1, parent2):
-            if len(route1) < 2 or len(route2) < 2:
-                # Rota 2'den küçükse, çaprazlama yapmadan kopyala
-                child1.append(route1[:])
-                child2.append(route2[:])
-                continue
+        for generation in range(self.generations):
+            # Fitness değerlerine göre sırala
+            population = sorted(population, key=self._fitness, reverse=True)
             
-            # Rastgele bir kesim noktası seç
-            start, end = sorted(random.sample(range(len(route1)), 2))
-            # Çocuk 1: parent1'in kesim parçası + parent2'nin kalanları
-            child1_route = route1[start:end]
-            child1_route += [dp for dp in route2 if dp not in child1_route]
-            # Çocuk 2: parent2'nin kesim parçası + parent1'in kalanları
-            child2_route = route2[start:end]
-            child2_route += [dp for dp in route1 if dp not in child2_route]
+            # En iyi %25'i koru (elitism)
+            elite_size = self.population_size // 4
+            new_population = population[:elite_size]
             
-            child1.append(child1_route)
-            child2.append(child2_route)
-        
-        return child1, child2
-
-    def _mutate(self, individual: List[List[int]]) -> List[List[int]]:
-        """Rastgele iki teslimat noktasını yer değiştirir."""
-        for route in individual:
-            if random.random() < self.mutation_rate and len(route) > 1:
-                i, j = random.sample(range(len(route)), 2)
-                route[i], route[j] = route[j], route[i]
-        return individual
-
-    def run(self, current_time: str = "10:00") -> Tuple[List[List[int]], float]:
-        """Genetik algoritmayı çalıştırır ve en iyi rotayı döndürür."""
-        population = self.population[:]
-        
-        for _ in range(self.generations):
-            new_population = []
-            
-            # Elitizm: En iyi bireyi koru
-            best_individual = max(population, key=lambda ind: self._calculate_fitness(ind, current_time))
-            new_population.append(best_individual)
-            
-            # Yeni popülasyon oluştur
+            # Kalan popülasyonu üret
             while len(new_population) < self.population_size:
-                parent1 = self._tournament_selection(population)
-                parent2 = self._tournament_selection(population)
-                child1, child2 = self._crossover(parent1, parent2)
-                child1 = self._mutate(child1)
-                child2 = self._mutate(child2)
-                new_population.extend([child1, child2])
+                # Tournament selection
+                parent1 = self._tournament_selection(population[:self.population_size//2])
+                parent2 = self._tournament_selection(population[:self.population_size//2])
+                
+                # Crossover ve mutation
+                child = []
+                for p1_route, p2_route in zip(parent1, parent2):
+                    child_route = self._crossover(p1_route, p2_route)
+                    child_route = self._mutate(child_route)
+                    child.append(child_route)
+                
+                # Çocuğu kontrol et ve onar
+                is_valid, error_msg = self.validate_chromosome(child)
+                if not is_valid:
+                    child = self.repair_chromosome(child)
+                
+                new_population.append(child)
             
-            population = new_population[:self.population_size]
+            population = new_population
+            
+            # Progress log
+            if generation % 20 == 0:
+                best_individual = sorted(population, key=self._fitness, reverse=True)[0]
+                delivered_count = sum(len(route) for route in best_individual)
+                print(f"Generation {generation}: {delivered_count}/{len(self.delivery_points)} teslimat yapıldı.")
         
-        # En iyi bireyi bul
-        best_individual = max(population, key=lambda ind: self._calculate_fitness(ind, current_time))
-        best_fitness = self._calculate_fitness(best_individual, current_time)
+        # En iyi çözümü döndür
+        best_individual = sorted(population, key=self._fitness, reverse=True)[0]
+        best_fitness = self._fitness(best_individual)
         
         return best_individual, best_fitness
+
+    def _tournament_selection(self, population: List[List[List[int]]], tournament_size: int = 3) -> List[List[int]]:
+        """Tournament selection ile parent seçimi."""
+        tournament = random.sample(population, min(tournament_size, len(population)))
+        return max(tournament, key=self._fitness)

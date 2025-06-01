@@ -1,62 +1,50 @@
 import matplotlib
 matplotlib.use('Agg')  # Tkinter yerine Agg arka ucunu kullan
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from typing import List, Tuple
 from src.models.drone import Drone
 from src.models.delivery_point import DeliveryPoint
 from src.models.no_fly_zone import NoFlyZone
+from src.utils.graph import Graph
 
-def plot_routes(drones: List[Drone], delivery_points: List[DeliveryPoint], 
-                no_fly_zones: List[NoFlyZone], routes: List[List[int]], 
-                filename: str = "output/routes.png"):
-    """Drone rotalarını ve uçuş yasağı bölgelerini görselleştirir."""
-    fig, ax = plt.subplots(figsize=(10, 10))
-    
-    # Uçuş yasağı bölgelerini çiz (gri dolgulu çokgenler)
-    for nfz in no_fly_zones:
-        polygon = patches.Polygon(nfz.coordinates, closed=True, facecolor='gray', alpha=0.5)
-        ax.add_patch(polygon)
-    
-    # Teslimat noktalarını çiz (kırmızı noktalar)
+def plot_routes(drones: list[Drone], delivery_points: list[DeliveryPoint], no_fly_zones: list[NoFlyZone], routes: list[list[int]], graph: Graph, filename: str = "output/routes.png"):
+    plt.figure(figsize=(10, 10))
+
+    # Uçuş yasağı bölgelerini çiz
+    for i, nfz in enumerate(no_fly_zones):
+        coords = nfz.coordinates + [nfz.coordinates[0]]  # Poligonu kapatmak için ilk koordinatı ekle
+        x, y = zip(*coords)
+        plt.fill(x, y, "r", alpha=0.3, label="Uçuş Yasağı Bölgesi" if i == 0 else None)
+
+    # Teslimat noktalarını çiz
     for dp in delivery_points:
-        ax.plot(dp.pos[0], dp.pos[1], 'ro', label='Teslimat Noktası' if dp == delivery_points[0] else "")
-        ax.text(dp.pos[0], dp.pos[1], f'dp_{dp.id}', fontsize=8, ha='right')
-    
-    # Drone başlangıç pozisyonlarını çiz (mavi noktalar)
+        plt.plot(dp.pos[0], dp.pos[1], "bo", label="Teslimat Noktası" if dp == delivery_points[0] else "")
+        plt.text(dp.pos[0], dp.pos[1], f"DP{dp.id}")
+
+    # Droneları çiz
     for drone in drones:
-        ax.plot(drone.start_pos[0], drone.start_pos[1], 'bo', label='Drone' if drone == drones[0] else "")
-        ax.text(drone.start_pos[0], drone.start_pos[1], f'drone_{drone.id}', fontsize=8, ha='left')
-    
-    # Rotları çiz (her drone için farklı renk)
-    colors = ['green', 'blue', 'purple', 'orange', 'cyan']
-    for drone_idx, route in enumerate(routes):
-        if not route:
-            continue
-        # Drone başlangıç pozisyonundan başla
-        current_pos = drones[drone_idx].start_pos
-        path_x = [current_pos[0]]
-        path_y = [current_pos[1]]
-        
-        # Teslimat noktalarına sırayla git
-        for dp_id in route:
-            dp = next((dp for dp in delivery_points if dp.id == dp_id), None)
-            if dp:
-                path_x.append(dp.pos[0])
-                path_y.append(dp.pos[1])
-                current_pos = dp.pos
-        
-        # Rotayı çiz
-        ax.plot(path_x, path_y, color=colors[drone_idx % len(colors)], 
-                linestyle='-', linewidth=2, label=f'Drone {drone_idx} Rotası')
-    
-    # Grafik ayarları
-    ax.set_xlabel('X Koordinatı')
-    ax.set_ylabel('Y Koordinatı')
-    ax.set_title('Drone Teslimat Rotaları')
-    ax.legend()
-    ax.grid(True)
-    
-    # PNG olarak kaydet
-    plt.savefig(filename, bbox_inches='tight')
+        plt.plot(drone.start_pos[0], drone.start_pos[1], "g^", label="Drone" if drone == drones[0] else "")
+        plt.text(drone.start_pos[0], drone.start_pos[1], f"D{drone.id}")
+
+    # Rotaları çiz
+    colors = ["b", "g", "c", "m", "y", "k"]
+    for i, route in enumerate(routes):
+        if route:
+            color = colors[i % len(colors)]
+            x, y = [drones[i].start_pos[0]], [drones[i].start_pos[1]]
+            for dp_id in route:
+                try:
+                    dp = next(dp for dp in delivery_points if dp.id == dp_id)
+                    x.append(dp.pos[0])
+                    y.append(dp.pos[1])
+                except StopIteration:
+                    print(f"Uyarı: Teslimat noktası ID {dp_id} bulunamadı, rotada atlanıyor.")
+                    continue
+            plt.plot(x, y, color=color, linestyle="-", label=f"Drone {drones[i].id} Rotası")
+
+    plt.legend()
+    plt.grid(True)
+    plt.xlabel("X Koordinatı")
+    plt.ylabel("Y Koordinatı")
+    plt.title("Drone Rotaları ve Uçuş Yasağı Bölgeleri")
+    plt.savefig(filename)
     plt.close()

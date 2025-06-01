@@ -1,5 +1,10 @@
 class NoFlyZone:
     def __init__(self, id: int, coordinates: list, active_time: tuple):
         self.id = id
-        self.coordinates = coordinates  # [(x1, y1), (x2, y2), ...]
-        self.active_time = active_time  # (start, end), e.g., ("09:30", "11:00")
+        self.coordinates = coordinates
+        self.active_time = active_time  # (start_time, end_time) in minutes
+
+    def is_active(self, current_time: int) -> bool:
+        """Uçuş yasağı bölgesinin belirli bir zamanda aktif olup olmadığını kontrol eder."""
+        start_time, end_time = self.active_time
+        return start_time <= current_time <= end_time
